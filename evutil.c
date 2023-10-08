@@ -2972,6 +2972,7 @@ evutil_make_internal_pipe_(evutil_socket_t fd[2])
 #define LOCAL_SOCKETPAIR_AF AF_UNIX
 #endif
 	if (evutil_socketpair(LOCAL_SOCKETPAIR_AF, SOCK_STREAM, 0, fd) == 0) {
+		// nonblocking && 子进程不能访问socket（closenoexec）
 		if (evutil_fast_socket_nonblocking(fd[0]) < 0 ||
 		    evutil_fast_socket_nonblocking(fd[1]) < 0 ||
 		    evutil_fast_socket_closeonexec(fd[0]) < 0 ||

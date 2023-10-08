@@ -255,6 +255,7 @@ epoll_init(struct event_base *base)
 	}
 #endif
 
+	// 用管道实现的，在libevent监听管道读端事件判断是否有signal发生
 	if (sigfd_init_(base) < 0)
 		evsig_init_(base);
 

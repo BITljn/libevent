@@ -201,6 +201,7 @@ evsig_init_(struct event_base *base)
 		EV_READ | EV_PERSIST, evsig_cb, base);
 
 	base->sig.ev_signal.ev_flags |= EVLIST_INTERNAL;
+	// 设置最高优先级
 	event_priority_set(&base->sig.ev_signal, 0);
 
 	base->evsigsel = &evsigops;
