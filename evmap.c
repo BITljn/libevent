@@ -57,6 +57,11 @@
 	write on a given fd, and the number of each.
   */
 struct evmap_io {
+	/*
+		struct event_dlist {
+			struct event* lh_first; // 一个event关联一个fd
+		}
+	*/
 	struct event_dlist events;
 	ev_uint16_t nread;
 	ev_uint16_t nwrite;
@@ -290,6 +295,8 @@ evmap_io_add_(struct event_base *base, evutil_socket_t fd, struct event *ev)
 			return (-1);
 	}
 #endif
+    // fd是slot索引用来查找数组，所有的事件在放到activeq之前都是在evmap_io中的，ctor=evmap_io_init用来初始化内存
+	// 这里就可以看到同一个fd的所有事件注册时保存在一个evmap_io中，event中有链表成员能够互相串起来
 	GET_IO_SLOT_AND_CTOR(ctx, io, fd, evmap_io, evmap_io_init,
 						 evsel->fdinfo_len);
 
@@ -329,11 +336,13 @@ evmap_io_add_(struct event_base *base, evutil_socket_t fd, struct event *ev)
 		return -1;
 	}
 
+	// 对于一个fd，可以多次添加关注的事件类型，有新的类型就走到这里，这里不care事件的callback只关注类型
 	if (res) {
 		void *extra = ((char*)ctx) + sizeof(struct evmap_io);
 		/* XXX(niels): we cannot mix edge-triggered and
 		 * level-triggered, we should probably assert on
 		 * this. */
+		/*int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);*/
 		if (evsel->add(base, ev->ev_fd,
 			old, (ev->ev_events & EV_ET) | res, extra) == -1)
 			return (-1);
@@ -343,6 +352,7 @@ evmap_io_add_(struct event_base *base, evutil_socket_t fd, struct event *ev)
 	ctx->nread = (ev_uint16_t) nread;
 	ctx->nwrite = (ev_uint16_t) nwrite;
 	ctx->nclose = (ev_uint16_t) nclose;
+	// 每次插入到头部， ctx是evmap_io类型
 	LIST_INSERT_HEAD(&ctx->events, ev, ev_io_next);
 
 	return (retval);

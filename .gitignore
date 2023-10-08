@@ -171,3 +171,9 @@ rules.ninja
 
 # clangd
 .cache
+
+
+# ljn
+build/myapp
+build/.cmake/
+build/Testing/

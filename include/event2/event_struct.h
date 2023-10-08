@@ -165,6 +165,8 @@ TAILQ_HEAD (event_list, event);
 #undef TAILQ_HEAD
 #endif
 
+// 这里是结构体类型struct event_dlist定义
+// 结构体名称event_dlist, 结构体保包含一个指向event结构体的指针
 LIST_HEAD (event_dlist, event); 
 
 #ifdef EVENT_DEFINED_LISTENTRY_

@@ -2014,6 +2014,8 @@ event_base_loop(struct event_base *base, int flags)
 
 		tv_p = &tv;
 		if (!N_ACTIVE_CALLBACKS(base) && !(flags & EVLOOP_NONBLOCK)) {
+			/* 最小堆找到一个timer时间，判断时间，如果直接过时则清理这个事件的timer，如果没有超时就单纯打印要timeout的时间。
+			   注意这里没有从min_hip中进行pop, tv_p 是还有多久要到期的时间。*/
 			timeout_next(base, &tv_p);
 		} else {
 			/*
@@ -2031,9 +2033,12 @@ event_base_loop(struct event_base *base, int flags)
 			goto done;
 		}
 
+		/*active_later_queue 这个是下一个周期要调度的event，如果有将他们按照优先级放到active队列*/
 		event_queue_make_later_events_active(base);
 
 		/* Invoke prepare watchers before polling for events */
+		// epoll之前会调用prepare函数，这个函数是用户注册的，可以在这里做一些准备工作
+		// timeout_next 获取，这个时间最早到期的timer事件的剩余事件，是个差值。
 		prepare_info.timeout = tv_p;
 		TAILQ_FOREACH(watcher, &base->watchers[EVWATCH_PREPARE], next) {
 			EVBASE_RELEASE_LOCK(base, th_base_lock);
@@ -2043,6 +2048,9 @@ event_base_loop(struct event_base *base, int flags)
 
 		clear_time_cache(base);
 
+		// 调用底层epoll获取事件，这里是epoll_dispatch, 会把ready的事件放到队列中，详细代码在epoll.c中
+		// epoll_dispatch 底层调用epoll_wait或epoll_pwait. 这里返回-1表示出错。
+		// tv_p 是给epoll设置的超时时间，就是针对timer我们对于epoll是可以有等待的最短预期的。
 		res = evsel->dispatch(base, tv_p);
 
 		if (res == -1) {
@@ -2056,15 +2064,19 @@ event_base_loop(struct event_base *base, int flags)
 
 		/* Invoke check watchers after polling for events, and before
 		 * processing them */
+		// polling即epoll，epoll结束后，用户callback之前会调用check函数
 		TAILQ_FOREACH(watcher, &base->watchers[EVWATCH_CHECK], next) {
 			EVBASE_RELEASE_LOCK(base, th_base_lock);
 			(*watcher->callback.check)(watcher, &check_info, watcher->arg);
 			EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 		}
 
+		// 处理timeout事件，检查min_heap,把所有堆顶部超市的timer事件全部添加到activeq中去（有删除minheap然后添加active的过程）
 		timeout_process(base);
 
+		// 这里正常情况下，调用eventbase_dispatch()的过程，这个flag是0，表示默认处理多次
 		if (N_ACTIVE_CALLBACKS(base)) {
+			// 处理所有active事件，这里会调用用户注册的回调函数
 			int n = event_process_active(base);
 			if ((flags & EVLOOP_ONCE)
 			    && N_ACTIVE_CALLBACKS(base) == 0
@@ -2713,10 +2725,12 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 	if ((ev->ev_events & (EV_READ|EV_WRITE|EV_CLOSED|EV_SIGNAL)) &&
 	    !(ev->ev_flags & (EVLIST_INSERTED|EVLIST_ACTIVE|EVLIST_ACTIVE_LATER))) {
 		if (ev->ev_events & (EV_READ|EV_WRITE|EV_CLOSED))
+			// 1 表示是新的类型事件的注册，0表示正常注册（事件类型已经注册过）， -1 出错
 			res = evmap_io_add_(base, ev->ev_fd, ev);
 		else if (ev->ev_events & EV_SIGNAL)
 			res = evmap_signal_add_(base, (int)ev->ev_fd, ev);
 		if (res != -1)
+		    // 放入到evmap_io后就是EVLIST_INSERTED状态
 			event_queue_insert_inserted(base, ev);
 		if (res == 1) {
 			/* evmap says we need to notify the main thread. */
@@ -2729,7 +2743,7 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 	 * we should change the timeout state only if the previous event
 	 * addition succeeded.
 	 */
-	if (res != -1 && tv != NULL) {
+	if (res != -1 && tv != NULL) { // 表示一个timer事件
 		struct timeval now;
 		int common_timeout;
 #ifdef USE_REINSERT_TIMEOUT
@@ -3257,7 +3271,7 @@ timeout_process(struct event_base *base)
 	gettime(base, &now);
 
 	while ((ev = min_heap_top_(&base->timeheap))) {
-		if (evutil_timercmp(&ev->ev_timeout, &now, >))
+ 		if (evutil_timercmp(&ev->ev_timeout, &now, >))
 			break;
 
 		/* delete this event from the I/O queues */

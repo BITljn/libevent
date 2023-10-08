@@ -468,6 +468,8 @@ epoll_dispatch(struct event_base *base, struct timeval *tv)
 	long timeout = -1;
 #endif /* EVENT__HAVE_EPOLL_PWAIT2 */
 
+	/* timerfd 是 Linux 操作系统中提供的一种计时器描述符（timer file descriptor）机制。
+	   它是通过文件描述符形式提供的计时器接口，允许程序员基于时间事件执行特定操作，而无需手动管理定时器。*/
 #ifdef USING_TIMERFD
 	if (epollop->timerfd >= 0) {
 		struct itimerspec is;
@@ -511,8 +513,11 @@ epoll_dispatch(struct event_base *base, struct timeval *tv)
 	epoll_apply_changes(base);
 	event_changelist_remove_all_(&base->changelist, base);
 
+	// 调用epoll有锁保护
 	EVBASE_RELEASE_LOCK(base, th_base_lock);
 
+	/* 如果你想一直阻塞等待事件发生，使用 epoll_wait。
+	   如果你想等待事件发生，但可以设置一个超时时间，或者希望可以控制信号的阻塞，使用 epoll_pwait。*/
 #if defined(EVENT__HAVE_EPOLL_PWAIT2)
 	res = epoll_pwait2(epollop->epfd, events, epollop->nevents, tv ? &ts : NULL, NULL);
 #else /* no epoll_pwait2() */
@@ -554,9 +559,11 @@ epoll_dispatch(struct event_base *base, struct timeval *tv)
 				ev |= EV_CLOSED;
 		}
 
+		// 读取事件并赋值到ev，这里ev是空表示没有合法事件，直接跳过
 		if (!ev)
 			continue;
 
+		// 将对应event放到evmap_io中
 #ifdef EVENT__HAVE_WEPOLL
 		evmap_io_active_(base, events[i].data.sock, ev);
 #else
@@ -567,14 +574,15 @@ epoll_dispatch(struct event_base *base, struct timeval *tv)
 	if (res == epollop->nevents && epollop->nevents < MAX_NEVENT) {
 		/* We used all of the event space this time.  We should
 		   be ready for more events next time. */
+		// 两倍容量接收
 		int new_nevents = epollop->nevents * 2;
 		struct epoll_event *new_events;
 
 		new_events = mm_realloc(epollop->events,
 		    new_nevents * sizeof(struct epoll_event));
 		if (new_events) {
-			epollop->events = new_events;
-			epollop->nevents = new_nevents;
+			epollop->events = new_events; // 内存
+			epollop->nevents = new_nevents; // 数量
 		}
 	}
 
