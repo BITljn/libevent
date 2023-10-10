@@ -1487,8 +1487,8 @@ common_timeout_schedule(struct common_timeout_list *ctl,
     const struct timeval *now, struct event *head)
 {
 	struct timeval timeout = head->ev_timeout;
-	timeout.tv_usec &= MICROSECONDS_MASK;
-	event_add_nolock_(&ctl->timeout_event, &timeout, 1);
+	timeout.tv_usec &= MICROSECONDS_MASK; // 这个内部超时event，对应的一定不是common_timeout, 因此是直接放到了heap中去进行调度了。
+	event_add_nolock_(&ctl->timeout_event, &timeout, 1); // 这里是1是表示绝对时间
 }
 
 /* Callback: invoked when the timeout for a common timeout queue triggers.
@@ -1505,14 +1505,14 @@ common_timeout_callback(evutil_socket_t fd, short what, void *arg)
 	gettime(base, &now);
 	while (1) {
 		ev = TAILQ_FIRST(&ctl->events);
-		if (!ev || ev->ev_timeout.tv_sec > now.tv_sec ||
+		if (!ev || ev->ev_timeout.tv_sec > now.tv_sec ||  // 有时间但是时间超过now，也就是没有超时就退出
 		    (ev->ev_timeout.tv_sec == now.tv_sec &&
 			(ev->ev_timeout.tv_usec&MICROSECONDS_MASK) > now.tv_usec))
 			break;
 		event_del_nolock_(ev, EVENT_DEL_NOBLOCK);
 		event_active_nolock_(ev, EV_TIMEOUT, 1);
 	}
-	if (ev)
+	if (ev) // 这里说明领队后边还有event，因此需要再次注册一个
 		common_timeout_schedule(ctl, &now, ev);
 	EVBASE_RELEASE_LOCK(base, th_base_lock);
 }
@@ -1578,7 +1578,7 @@ event_base_init_common_timeout(struct event_base *base,
 	    duration->tv_usec | COMMON_TIMEOUT_MAGIC |
 	    (base->n_common_timeouts << COMMON_TIMEOUT_IDX_SHIFT);
 	evtimer_assign(&new_ctl->timeout_event, base,
-	    common_timeout_callback, new_ctl);
+	    common_timeout_callback, new_ctl); // one-shot timer event 
 	new_ctl->timeout_event.ev_flags |= EVLIST_INTERNAL;
 	event_priority_set(&new_ctl->timeout_event, 0);
 	new_ctl->base = base;
@@ -1989,7 +1989,7 @@ event_base_loop(struct event_base *base, int flags)
 	clear_time_cache(base);
 
 	if (base->sig.ev_signal_added && base->sig.ev_n_signals_added)
-		evsig_set_base_(base);
+		evsig_set_base_(base); // 这里主要是设置了全局写fd
 
 	done = 0;
 
@@ -2016,12 +2016,14 @@ event_base_loop(struct event_base *base, int flags)
 		if (!N_ACTIVE_CALLBACKS(base) && !(flags & EVLOOP_NONBLOCK)) {
 			/* 最小堆找到一个timer时间，判断时间，如果直接过时则清理这个事件的timer，如果没有超时就单纯打印要timeout的时间。
 			   注意这里没有从min_hip中进行pop, tv_p 是还有多久要到期的时间。*/
+			// 根据Timer事件计算evsel->dispatch的最大等待时间(超时值最小)
 			timeout_next(base, &tv_p);
 		} else {
 			/*
 			 * if we have active events, we just poll new events
 			 * without waiting.
 			 */
+			// 把等待时间置为0，即可不进行等待，马上触发事件
 			evutil_timerclear(&tv);
 		}
 
@@ -2072,17 +2074,18 @@ event_base_loop(struct event_base *base, int flags)
 		}
 
 		// 处理timeout事件，检查min_heap,把所有堆顶部超市的timer事件全部添加到activeq中去（有删除minheap然后添加active的过程）
+		// 这个地方注意内部事件例如（ctrl->timeout_event, 或者signal）这种事件都是优先级最高的，他们回调函数是注册其相关的user event到
+		// activeq, 而这些一定是>0的优先级，因此在event_process_active过程中，在同一个周期这些超时事件或者signal就能被处理，这里很巧妙。
 		timeout_process(base);
 
-		// 这里正常情况下，调用eventbase_dispatch()的过程，这个flag是0，表示默认处理多次
+		// 前边已经从epoll根timer的内部heap添加了一些事件到activeq，之后在这里判断是否有active事件，如果有就处理
 		if (N_ACTIVE_CALLBACKS(base)) {
-			// 处理所有active事件，这里会调用用户注册的回调函数
 			int n = event_process_active(base);
 			if ((flags & EVLOOP_ONCE)
 			    && N_ACTIVE_CALLBACKS(base) == 0
 			    && n != 0)
 				done = 1;
-		} else if (flags & EVLOOP_NONBLOCK)
+		} else if (flags & EVLOOP_NONBLOCK) // flag一开始是0，就是说一直阻塞，这里就是死循环
 			done = 1;
 	}
 	event_debug(("%s: asked to terminate loop.", __func__));
@@ -2193,7 +2196,7 @@ event_assign(struct event *ev, struct event_base *base, evutil_socket_t fd, shor
 	if (!base)
 		base = current_base;
 	if (arg == &event_self_cbarg_ptr_)
-		arg = ev;
+		arg = ev; // signal的回调参数是event类型
 
 	if (!(events & EV_SIGNAL))
 		event_debug_assert_socket_nonblocking_(fd);
@@ -2203,6 +2206,7 @@ event_assign(struct event *ev, struct event_base *base, evutil_socket_t fd, shor
 
 	ev->ev_callback = callback;
 	ev->ev_arg = arg;
+	// 对于signal这个fd就是信号值
 	ev->ev_fd = fd;
 	ev->ev_events = events;
 	ev->ev_res = 0;
@@ -2211,12 +2215,13 @@ event_assign(struct event *ev, struct event_base *base, evutil_socket_t fd, shor
 	ev->ev_pncalls = NULL;
 
 	if (events & EV_SIGNAL) {
+		// signal 跟读写close不兼容
 		if ((events & (EV_READ|EV_WRITE|EV_CLOSED)) != 0) {
 			event_warnx("%s: EV_SIGNAL is not compatible with "
 			    "EV_READ, EV_WRITE or EV_CLOSED", __func__);
 			return -1;
 		}
-		ev->ev_closure = EV_CLOSURE_EVENT_SIGNAL;
+		ev->ev_closure = EV_CLOSURE_EVENT_SIGNAL; // 这个closure表示了callback类型，不同closure有不同参数和callback处理逻辑
 	} else {
 		if (events & EV_PERSIST) {
 			evutil_timerclear(&ev->ev_io_timeout);
@@ -2226,10 +2231,12 @@ event_assign(struct event *ev, struct event_base *base, evutil_socket_t fd, shor
 		}
 	}
 
+	// 初始化小根堆的idx到最大值
 	min_heap_elem_init_(ev);
 
 	if (base != NULL) {
 		/* by default, we put new events into the middle priority */
+		// 默认的优先级是一半
 		ev->ev_pri = base->nactivequeues / 2;
 	}
 
@@ -2692,8 +2699,9 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 		 tv ? "EV_TIMEOUT " : " ",
 		 (void *)ev->ev_callback));
 
-	EVUTIL_ASSERT(!(ev->ev_flags & ~EVLIST_ALL));
+	EVUTIL_ASSERT(!(ev->ev_flags & ~EVLIST_ALL)); // 最开始是EVLIST_INIT
 
+	// ev_flags 是event流转的状态机
 	if (ev->ev_flags & EVLIST_FINALIZING) {
 		/* XXXX debug */
 		return (-1);
@@ -2716,16 +2724,19 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 #ifndef EVENT__DISABLE_THREAD_SUPPORT
 	if (base->current_event == event_to_event_callback(ev) &&
 	    (ev->ev_events & EV_SIGNAL)
-	    && !EVBASE_IN_THREAD(base)) {
+	    && !EVBASE_IN_THREAD(base)) { // 这里就是等待
 		++base->current_event_waiters;
 		EVTHREAD_COND_WAIT(base->current_event_cond, base->th_base_lock);
 	}
 #endif
 
+	// 事件有效，且event没有放到任何队列中
+	// EVLIST_INSERTED : 表示放到evmap中
 	if ((ev->ev_events & (EV_READ|EV_WRITE|EV_CLOSED|EV_SIGNAL)) &&
 	    !(ev->ev_flags & (EVLIST_INSERTED|EVLIST_ACTIVE|EVLIST_ACTIVE_LATER))) {
 		if (ev->ev_events & (EV_READ|EV_WRITE|EV_CLOSED))
 			// 1 表示是新的类型事件的注册，0表示正常注册（事件类型已经注册过）， -1 出错
+			// 对于信号来讲，这里也会增加一个内部事件，监听pipe[0]的可读事件，ev=EV_READ|EV_PERSIST
 			res = evmap_io_add_(base, ev->ev_fd, ev);
 		else if (ev->ev_events & EV_SIGNAL)
 			res = evmap_signal_add_(base, (int)ev->ev_fd, ev);
@@ -2746,7 +2757,7 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 	if (res != -1 && tv != NULL) { // 表示一个timer事件
 		struct timeval now;
 		int common_timeout;
-#ifdef USE_REINSERT_TIMEOUT
+#ifdef USE_REINSERT_TIMEOUT //没有定义
 		int was_common;
 		int old_timeout_idx;
 #endif
@@ -2762,7 +2773,7 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 
 #ifndef USE_REINSERT_TIMEOUT
 		if (ev->ev_flags & EVLIST_TIMEOUT) {
-			event_queue_remove_timeout(base, ev);
+			event_queue_remove_timeout(base, ev); // 从common_timeout 或者minheap删除
 		}
 #endif
 
@@ -2791,9 +2802,9 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 		was_common = is_common_timeout(&ev->ev_timeout, base);
 		old_timeout_idx = COMMON_TIMEOUT_IDX(&ev->ev_timeout);
 #endif
-
+        // 把时间转换为绝对时间
 		if (tv_is_absolute) {
-			ev->ev_timeout = *tv;
+			ev->ev_timeout = *tv; // 绝对时间
 		} else if (common_timeout) {
 			struct timeval tmp = *tv;
 			tmp.tv_usec &= MICROSECONDS_MASK;
@@ -2801,23 +2812,24 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 			ev->ev_timeout.tv_usec |=
 			    (tv->tv_usec & ~MICROSECONDS_MASK);
 		} else {
-			evutil_timeradd(&now, tv, &ev->ev_timeout);
+			evutil_timeradd(&now, tv, &ev->ev_timeout); // now + tv = ev_timeout
 		}
 
 		event_debug((
 			 "event_add: event %p, timeout in %d seconds %d useconds, call %p",
 			 (void *)ev, (int)tv->tv_sec, (int)tv->tv_usec, (void *)ev->ev_callback));
 
-#ifdef USE_REINSERT_TIMEOUT
+#ifdef USE_REINSERT_TIMEOUT // not defined
 		event_queue_reinsert_timeout(base, ev, was_common, common_timeout, old_timeout_idx);
 #else
-		event_queue_insert_timeout(base, ev);
+		event_queue_insert_timeout(base, ev); // 这里是放到commtimout or heap中，且ev_flag=EVLIST_TIMEOUT
 #endif
 
 		if (common_timeout) {
+			// 如果我们加入的 commonttimeout ev, 那么需要将ctl->timeout_event 内部事件注册进去，这个事件的回调是common_timeout_callback
 			struct common_timeout_list *ctl =
 			    get_common_timeout_list(base, &ev->ev_timeout);
-			if (ev == TAILQ_FIRST(&ctl->events)) {
+			if (ev == TAILQ_FIRST(&ctl->events)) { // 我们加入的是第一个，不是第一个加入就说明已经注册过了
 				common_timeout_schedule(ctl, &now, ev);
 			}
 		} else {
@@ -3271,10 +3283,14 @@ timeout_process(struct event_base *base)
 	gettime(base, &now);
 
 	while ((ev = min_heap_top_(&base->timeheap))) {
+		// ev->ev_timeout存的是绝对时间
+		//超时时间比此刻时间大，说明该event还没超时。那么余下的小根堆元素更不用检查了。
  		if (evutil_timercmp(&ev->ev_timeout, &now, >))
 			break;
 
 		/* delete this event from the I/O queues */
+		// .把event从这个event_base中所有的队列都删除，这里是timeout_process函数。所以对于有超时的event，才会被del掉。
+		// 对于有EV_PERSIST选项的event，在处理激活event的时候，会再次添加进event_base的, 这样做的一个好处就是，再次添加的时候，又可以重新计算该event的超时时间(绝对时间)
 		event_del_nolock_(ev, EVENT_DEL_NOBLOCK);
 
 		event_debug(("timeout_process: event: %p, call %p",
@@ -3496,7 +3512,7 @@ event_queue_insert_timeout(struct event_base *base, struct event *ev)
 {
 	EVENT_BASE_ASSERT_LOCKED(base);
 
-	if (EVUTIL_FAILURE_CHECK(ev->ev_flags & EVLIST_TIMEOUT)) {
+	if (EVUTIL_FAILURE_CHECK(ev->ev_flags & EVLIST_TIMEOUT)) { // 这里不期待包含这个EVLIST_TIMEOUT标志, 因为我们后面要设置麻
 		event_errx(1, "%s: %p(fd "EV_SOCK_FMT") already on timeout", __func__,
                    (void *)ev, EV_SOCK_ARG(ev->ev_fd));
 		return;
@@ -3504,12 +3520,12 @@ event_queue_insert_timeout(struct event_base *base, struct event *ev)
 
 	INCR_EVENT_COUNT(base, ev->ev_flags);
 
-	ev->ev_flags |= EVLIST_TIMEOUT;
+	ev->ev_flags |= EVLIST_TIMEOUT; // 之类就从EVLIST_INIT -> EVLIST_TIMEOUT
 
 	if (is_common_timeout(&ev->ev_timeout, base)) {
 		struct common_timeout_list *ctl =
 		    get_common_timeout_list(base, &ev->ev_timeout);
-		insert_common_timeout_inorder(ctl, ev);
+		insert_common_timeout_inorder(ctl, ev); // 从尾部开始遍历, 找到合适的位置插入，多线程有抢占的可能
 	} else {
 		min_heap_push_(&base->timeheap, ev);
 	}
@@ -3526,6 +3542,7 @@ event_queue_make_later_events_active(struct event_base *base)
 		evcb->evcb_flags = (evcb->evcb_flags & ~EVLIST_ACTIVE_LATER) | EVLIST_ACTIVE;
 		EVUTIL_ASSERT(evcb->evcb_pri < base->nactivequeues);
 		TAILQ_INSERT_TAIL(&base->activequeues[evcb->evcb_pri], evcb, evcb_active_next);
+		// deferred 表示后续将要处理，EV_CLOSURE_CB_SELF 表示callback参数是event类型
 		base->n_deferreds_queued += (evcb->evcb_closure == EV_CLOSURE_CB_SELF);
 	}
 }

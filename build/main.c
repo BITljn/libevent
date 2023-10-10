@@ -29,6 +29,11 @@ static void signal_cb(evutil_socket_t fd, short event, void *arg) {
     event_free(signal_event);
 }
 
+static void send_signal() {
+    sleep(2);
+    kill(getpid(), SIGUSR1);
+}
+
 int main() {
     struct event_base *base = event_base_new();
     if (!base) {
@@ -64,6 +69,8 @@ int main() {
         return 1;
     }
 
+    // set a timeout for the udp event
+    struct timeval udp_timeout = {3, 0};
     struct event *udp_event = event_new(base, udp_socket, EV_READ | EV_PERSIST, udp_read_callback, NULL);
     if (!udp_event) {
         fprintf(stderr, "Couldn't create UDP event.\n");
@@ -74,7 +81,7 @@ int main() {
     // 3. adding signal event
     struct event *signal_event;
     // 创建一个信号事件，监听SIGINT信号
-    signal_event = evsignal_new(base, SIGINT, signal_cb, event_self_cbarg());
+    signal_event = evsignal_new(base, SIGUSR1, signal_cb, event_self_cbarg()); // 最终也是调用event_new
     if (!signal_event) {
         fprintf(stderr, "Could not create a signal event!\n");
         return -1;
@@ -84,6 +91,10 @@ int main() {
         fprintf(stderr, "Could not add the signal event!\n");
         return -1;
     }
+
+    // start a thread and give a signal after 1s
+    //pthread_t tid;
+    //pthread_create(&tid, NULL, send_signal, NULL);
 
     printf("Entering event loop...\n");
     event_base_dispatch(base);

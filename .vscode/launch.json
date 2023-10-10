@@ -35,6 +35,14 @@
                     "description":  "将反汇编风格设置为 Intel",
                     "text": "-gdb-set disassembly-flavor intel",
                     "ignoreFailures": true
+                },
+                {
+                    "text": "-exec handle SIGUSR1 pass",
+                    "ignoreFailures": true
+                },
+                {
+                    "text": "-exec handle SIGUSR1 nostop",
+                    "ignoreFailures": true
                 }
             ]
         }

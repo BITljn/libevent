@@ -62,7 +62,7 @@ struct evmap_io {
 			struct event* lh_first; // 一个event关联一个fd
 		}
 	*/
-	struct event_dlist events;
+	struct event_dlist events; // doublely linked list
 	ev_uint16_t nread;
 	ev_uint16_t nwrite;
 	ev_uint16_t nclose;
@@ -277,7 +277,7 @@ evmap_io_init(struct evmap_io *entry)
 int
 evmap_io_add_(struct event_base *base, evutil_socket_t fd, struct event *ev)
 {
-	const struct eventop *evsel = base->evsel;
+	const struct eventop *evsel = base->evsel; // 这个在对应例如epoll.c里面有定义，sel是seleted缩写
 	struct event_io_map *io = &base->io;
 	struct evmap_io *ctx = NULL;
 	int nread, nwrite, nclose, retval = 0;
@@ -336,20 +336,20 @@ evmap_io_add_(struct event_base *base, evutil_socket_t fd, struct event *ev)
 		return -1;
 	}
 
-	// 对于一个fd，可以多次添加关注的事件类型，有新的类型就走到这里，这里不care事件的callback只关注类型
+	// 这个地方就是保证，可读、可写、close事件在底层的epoll只被注册一次
 	if (res) {
 		void *extra = ((char*)ctx) + sizeof(struct evmap_io);
 		/* XXX(niels): we cannot mix edge-triggered and
 		 * level-triggered, we should probably assert on
 		 * this. */
-		/*int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);*/
-		if (evsel->add(base, ev->ev_fd,
-			old, (ev->ev_events & EV_ET) | res, extra) == -1)
+		// epoll_nochangelist_add()
+		if (evsel->add(base, ev->ev_fd, 
+			old, (ev->ev_events & EV_ET) | res, extra) == -1) // 这里尝试增加EV_ET
 			return (-1);
 		retval = 1;
 	}
 
-	ctx->nread = (ev_uint16_t) nread;
+	ctx->nread = (ev_uint16_t) nread; // 这个fd被注册的读事件总数
 	ctx->nwrite = (ev_uint16_t) nwrite;
 	ctx->nclose = (ev_uint16_t) nclose;
 	// 每次插入到头部， ctx是evmap_io类型
@@ -459,11 +459,11 @@ evmap_signal_init(struct evmap_signal *entry)
 int
 evmap_signal_add_(struct event_base *base, int sig, struct event *ev)
 {
-	const struct eventop *evsel = base->evsigsel;
-	struct event_signal_map *map = &base->sigmap;
-	struct evmap_signal *ctx = NULL;
+	const struct eventop *evsel = base->evsigsel; // event signal select 缩写
+	struct event_signal_map *map = &base->sigmap; // 大数组
+	struct evmap_signal *ctx = NULL; //ctx在调用GET_SIGNAL_SLOT_AND_CTOR 会被赋值， 这个signal可以串联多个event事件
 
-	if (sig < 0 || sig >= NSIG)
+	if (sig < 0 || sig >= NSIG) // 65
 		return (-1);
 
 	if (sig >= map->nentries) {
@@ -471,11 +471,12 @@ evmap_signal_add_(struct event_base *base, int sig, struct event *ev)
 			map, sig, sizeof(struct evmap_signal *)) == -1)
 			return (-1);
 	}
-	GET_SIGNAL_SLOT_AND_CTOR(ctx, map, sig, evmap_signal, evmap_signal_init,
+	GET_SIGNAL_SLOT_AND_CTOR(ctx, map, sig, evmap_signal, evmap_signal_init, // ctor contructor 缩写
 	    base->evsigsel->fdinfo_len);
 
 	if (LIST_EMPTY(&ctx->events)) {
-		if (evsel->add(base, ev->ev_fd, 0, EV_SIGNAL, ev)
+		// 这个地方就是只有空event才进行，这里针对其中的一个signal注意, 这个signal要用sigaction注册
+		if (evsel->add(base, ev->ev_fd, 0, EV_SIGNAL, ev) // evsig_add()
 		    == -1)
 			return (-1);
 	}

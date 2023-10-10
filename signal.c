@@ -261,12 +261,13 @@ evsig_set_handler_(struct event_base *base,
 	/* save previous handler and setup new handler */
 #ifdef EVENT__HAVE_SIGACTION
 	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = handler;
+	sa.sa_handler = handler; // 信号处理的回调，这个是我们自定义的，因为要写pipe。evsig_handler
 #ifdef SA_RESTART
 	sa.sa_flags |= SA_RESTART;
 #endif
 	sigfillset(&sa.sa_mask);
 
+	// 参数含义：信号编号、sigaction指针，旧的sigaction指针,这个针对同一个信号是其旧处理方式
 	if (sigaction(evsignal, &sa, sig->sh_old[evsignal]) == -1) {
 		event_warn("sigaction");
 		mm_free(sig->sh_old[evsignal]);
@@ -307,16 +308,20 @@ evsig_add(struct event_base *base, evutil_socket_t evsignal, short old, short ev
 	}
 	evsig_base = base;
 	evsig_base_n_signals_added = ++sig->ev_n_signals_added;
-	evsig_base_fd = base->sig.ev_signal_pair[1];
+	evsig_base_fd = base->sig.ev_signal_pair[1]; // 这个是收到信号后写的socket pair的fd，是个全局的变量
 	EVSIGBASE_UNLOCK();
 
 	event_debug(("%s: %d: changing signal handler", __func__, (int)evsignal));
-	if (evsig_set_handler_(base, (int)evsignal, evsig_handler) == -1) {
+	// 这里是用sigaction给操作系统注册新号及其处理方式，注意所有新号的处理方式都是evsig_handler，就是写pipe[1]
+	// 所以信号都只会触发一次set_handler过程， 所有handler都去写这个evsig_base_fd = pair[1]
+	if (evsig_set_handler_(base, (int)evsignal, evsig_handler) == -1) { // 这个回调是写pipe，就是信号触发了就写pipe[1], 写的这个内容就是sig数字，因此读端就可以获取信号进而处理这个fd关联的所有event
 		goto err;
 	}
 
 
 	if (!sig->ev_signal_added) {
+		// 这里也是只添加一次针对pipe[1], 其注册一个evmap_io事件（pipe[0]可读），这个可读的内容可以代表不同的信号
+		// 这里是所有信号只会被处理一次，就是注册唯一的内部处理事件！！！！
 		if (event_add_nolock_(&sig->ev_signal, NULL, 0))
 			goto err;
 		sig->ev_signal_added = 1;

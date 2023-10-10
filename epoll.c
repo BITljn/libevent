@@ -114,6 +114,7 @@ static void *epoll_init(struct event_base *);
 static int epoll_dispatch(struct event_base *, struct timeval *);
 static void epoll_dealloc(struct event_base *);
 
+// epollops_changelist 这个是其backend，函数接口
 static const struct eventop epollops_changelist = {
 	"epoll (with changelist)",
 	epoll_init,
@@ -308,7 +309,7 @@ epoll_apply_one_change(struct event_base *base,
     struct epollop *epollop,
     const struct event_change *ch)
 {
-	struct epoll_event epev;
+	struct epoll_event epev; // epoll标准的event
 	int op, events = 0;
 	int idx;
 
@@ -325,7 +326,7 @@ epoll_apply_one_change(struct event_base *base,
 		events |= EPOLLET;
 
 	memset(&epev, 0, sizeof(epev));
-#ifdef EVENT__HAVE_WEPOLL
+#ifdef EVENT__HAVE_WEPOLL // 这个是window平台下的wepoll
 	epev.data.sock = ch->fd;
 #else
 	epev.data.fd = ch->fd;
@@ -564,7 +565,7 @@ epoll_dispatch(struct event_base *base, struct timeval *tv)
 		if (!ev)
 			continue;
 
-		// 将对应event放到evmap_io中
+		// 将对应event放到active队里中
 #ifdef EVENT__HAVE_WEPOLL
 		evmap_io_active_(base, events[i].data.sock, ev);
 #else
